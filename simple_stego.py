@@ -310,8 +310,9 @@ def encode_message(encoder, input_image, output_image, message, data_depth=1, us
     return {'psnr': psnr_value, 'ssim': ssim_value}
 
 # Function to decode a message from an image
-def decode_message(decoder, stego_image, expected_chars=20, data_depth=1, use_cuda=False):
-    """Decode a message from an image."""
+# Replace the decode_message function with this improved version
+def decode_message(decoder, stego_image, data_depth=1, use_cuda=False):
+    """Decode a message from an image without requiring prior knowledge of the message."""
     # Set device
     device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
     decoder.to(device)
@@ -333,22 +334,47 @@ def decode_message(decoder, stego_image, expected_chars=20, data_depth=1, use_cu
     # Extract binary message
     decoded_bits = (decoded >= 0).cpu().numpy().flatten()
     
-    # Convert bits to text (taking enough bits for expected_chars)
-    bits_needed = expected_chars * 8
+    # Convert bits to text, looking for valid characters
     message = ""
+    repeating_pattern = None
     
-    for i in range(0, min(bits_needed, len(decoded_bits)), 8):
+    # Try to decode the first few hundred characters
+    max_chars_to_check = 100
+    
+    for i in range(0, min(max_chars_to_check * 8, len(decoded_bits)), 8):
         if i + 8 <= len(decoded_bits):
             byte = 0
             for j in range(8):
                 byte = (byte << 1) | int(decoded_bits[i + j])
-            try:
+            
+            # Only add printable ASCII characters
+            if 32 <= byte <= 126:
                 message += chr(byte)
-            except:
-                pass
     
-    print(f"Decoded message: {message}")
-    return message
+    # Look for repeating patterns in the decoded message
+    if len(message) > 0:
+        # Try to find a pattern by looking at the first half of the decoded message
+        for pattern_length in range(1, len(message) // 2):
+            pattern = message[:pattern_length]
+            # Check if this pattern repeats at least twice
+            repetitions = 0
+            for i in range(0, len(message), pattern_length):
+                if message[i:i+pattern_length] == pattern:
+                    repetitions += 1
+                else:
+                    break
+            
+            if repetitions >= 2:
+                repeating_pattern = pattern
+                break
+    
+    print(f"Decoded raw message: {message[:50]}..." if len(message) > 50 else f"Decoded raw message: {message}")
+    
+    if repeating_pattern:
+        print(f"Detected repeating pattern: {repeating_pattern}")
+        return repeating_pattern
+    else:
+        return message
 
 def main():
     parser = argparse.ArgumentParser(description="Train and test simple steganography model")
@@ -435,13 +461,23 @@ def main():
     
     if args.decode:
         print("Decoding message...")
-        decode_message(
+        decoded_message = decode_message(
             decoder,
             args.output,
-            len(args.message),
             args.data_depth,
             args.cuda
         )
+        
+        # If a message was provided, compare the results
+        if args.message:
+            if decoded_message == args.message:
+                print("✅ Success! The decoded message matches what you provided.")
+            else:
+                print("⚠️ The decoded message differs from what you provided:")
+                print(f"  Expected: {args.message}")
+                print(f"  Decoded:  {decoded_message}")
+        else:
+            print(f"Final decoded message: {decoded_message}")
 
 if __name__ == "__main__":
     main()
