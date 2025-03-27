@@ -214,7 +214,7 @@ def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10,
                 for i in range(batch_size):
                     val_psnr += peak_signal_noise_ratio(cover_np[i], stego_np[i])
                     val_ssim += structural_similarity(
-                        cover_np[i], stego_np[i], multichannel=True, channel_axis=2)
+                        cover_np[i], stego_np[i], multichannel=True, channel_axis=2, data_range=1.0)
                 
                 # Calculate bit accuracy
                 bit_accuracy = torch.mean(((decoded >= 0) == (payload >= 0.5)).float())
