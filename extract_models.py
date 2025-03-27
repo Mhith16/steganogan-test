@@ -1,28 +1,59 @@
 import torch
 import pickle
 import os
+import io
 
-# Mock the necessary classes so they can be loaded
+# Create mock class for loading
 class SteganoGAN:
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         self.encoder = None
         self.decoder = None
         self.critic = None
+        self.data_depth = 1
 
-# Register the mock class with pickle
-pickle.Unpickler.find_class.__globals__['__main__'] = type('MockModule', (), {'SteganoGAN': SteganoGAN})
+# Define custom unpickler
+class CustomUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if module == "__main__" and name == "SteganoGAN":
+            return SteganoGAN
+        try:
+            return super().find_class(module, name)
+        except:
+            return getattr(torch.nn, name, None)
 
-# Load the model and extract components
+# Load the model using custom unpickler
 model_path = 'pretrained/medical_xray.steg'
 print(f"Loading model from {model_path}")
 
-model = torch.load(model_path, map_location='cpu')
-encoder = model.encoder
-decoder = model.decoder
+with open(model_path, 'rb') as f:
+    model_data = f.read()
 
-# Save just the encoder and decoder
-os.makedirs('extracted', exist_ok=True)
-torch.save(encoder, 'extracted/encoder.pt')
-torch.save(decoder, 'extracted/decoder.pt')
+unpickler = CustomUnpickler(io.BytesIO(model_data))
+try:
+    model = unpickler.load()
+    print("Model loaded successfully")
+    
+    # Check if encoder and decoder exist
+    if hasattr(model, 'encoder') and model.encoder is not None:
+        print("Encoder found")
+        torch.save(model.encoder, 'encoder.pt')
+        print("Encoder saved to encoder.pt")
+    else:
+        print("No encoder found in model")
+        
+    if hasattr(model, 'decoder') and model.decoder is not None:
+        print("Decoder found")
+        torch.save(model.decoder, 'decoder.pt')
+        print("Decoder saved to decoder.pt")
+    else:
+        print("No decoder found in model")
+    
+    # Save data depth if available
+    if hasattr(model, 'data_depth'):
+        print(f"Data depth: {model.data_depth}")
+        with open('data_depth.txt', 'w') as f:
+            f.write(str(model.data_depth))
+        print("Data depth saved to data_depth.txt")
 
-print("Extracted encoder and decoder saved to 'extracted' directory.")
+except Exception as e:
+    print(f"Error loading model: {e}")
