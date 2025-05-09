@@ -422,8 +422,11 @@ def main():
             print("Models not found. You need to train the model first with --train")
             return
         
-        encoder = torch.load(encoder_path, map_location='cpu')
-        decoder = torch.load(decoder_path, map_location='cpu')
+        encoder = Encoder(data_depth=args.data_depth)
+        decoder = Decoder(data_depth=args.data_depth)
+        encoder.load_state_dict(torch.load(encoder_path, map_location='cpu'))
+        decoder.load_state_dict(torch.load(decoder_path, map_location='cpu'))
+
     
     if args.encode:
         print("Encoding message...")
