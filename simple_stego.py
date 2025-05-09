@@ -242,8 +242,8 @@ def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10,
         torch.save(decoder, os.path.join(output_dir, f'decoder_epoch_{epoch+1}.pt'))
     
     # Save final models
-    torch.save(encoder, os.path.join(output_dir, 'encoder_final.pt'))
-    torch.save(decoder, os.path.join(output_dir, 'decoder_final.pt'))
+    torch.save(encoder.state_dict(), os.path.join(output_dir, 'encoder_final.pt'))
+    torch.save(decoder.state_dict(), os.path.join(output_dir, 'decoder_final.pt'))
     
     print("Training completed. Models saved.")
     return encoder, decoder
