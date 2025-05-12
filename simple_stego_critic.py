@@ -155,7 +155,7 @@ class XrayDataset(Dataset):
 def generate_random_data(batch_size, data_depth, height, width, device):
     return torch.randint(0, 2, (batch_size, data_depth, height, width), device=device).float()
 
-# Helper function for WGAN-GP gradient penalty (new)
+# Helper function for WGAN-GP gradient penalty
 def compute_gradient_penalty(critic, real_samples, fake_samples, device):
     """Compute gradient penalty for WGAN-GP"""
     # Random weight for interpolation
@@ -187,7 +187,7 @@ def compute_gradient_penalty(critic, real_samples, fake_samples, device):
 # Enhanced training function with adversarial training
 def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10, 
                 batch_size=4, data_depth=1, img_size=256, hidden_size=32, 
-                critic_weight=1.0, encoder_weight=10.0, decoder_weight=1.0, 
+                critic_weight=2.0, encoder_weight=5.0, decoder_weight=1.0,  # Updated weights
                 use_cuda=False):
     # Set device
     device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
@@ -217,10 +217,10 @@ def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10,
     decoder = Decoder(data_depth, hidden_size).to(device)
     critic = Critic(hidden_size).to(device)
     
-    # Setup optimizers - separate optimizers for generators and critic
+    # Setup optimizers - separate optimizers for generators and critic with updated learning rates
     encoder_decoder_params = list(encoder.parameters()) + list(decoder.parameters())
     encoder_decoder_optimizer = optim.Adam(encoder_decoder_params, lr=0.001)
-    critic_optimizer = optim.Adam(critic.parameters(), lr=0.0001)
+    critic_optimizer = optim.Adam(critic.parameters(), lr=0.0002)  # Increased from 0.0001
     
     # Training loop
     for epoch in range(epochs):
@@ -235,6 +235,9 @@ def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10,
         
         print(f"Epoch {epoch+1}/{epochs}")
         
+        # Dynamic critic iterations - more at the beginning
+        critic_iterations = 5 if epoch < 2 else 3
+        
         # Training
         for batch_idx, cover in enumerate(train_loader):
             cover = cover.to(device)
@@ -243,8 +246,9 @@ def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10,
             # Generate random binary data
             payload = generate_random_data(batch_size, data_depth, height, width, device)
             
-            # ===== Train Critic =====
-            for _ in range(5):  # Train critic more iterations per batch
+            # Warmup phase - only train critic in first few batches of first epoch
+            if epoch == 0 and batch_idx < 100:
+                # Train only the critic
                 critic_optimizer.zero_grad()
                 
                 # Generate stego images
@@ -258,16 +262,39 @@ def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10,
                 # Wasserstein loss for critic
                 critic_loss = torch.mean(fake_score) - torch.mean(real_score)
                 
-                # Apply gradient penalty (WGAN-GP)
+                # Apply gradient penalty (WGAN-GP) with reduced coefficient
                 gradient_penalty = compute_gradient_penalty(critic, cover, stego, device)
-                critic_loss = critic_loss + 10 * gradient_penalty
+                critic_loss = critic_loss + 5 * gradient_penalty  # Changed from 10 to 5
                 
                 critic_loss.backward()
                 critic_optimizer.step()
                 
-                # Clip weights for Wasserstein loss stability
-                for p in critic.parameters():
-                    p.data.clamp_(-0.01, 0.01)
+                train_critic_loss += critic_loss.item()
+                continue
+            
+            # ===== Train Critic =====
+            for _ in range(critic_iterations):
+                critic_optimizer.zero_grad()
+                
+                # Generate stego images
+                with torch.no_grad():
+                    stego = encoder(cover, payload)
+                
+                # Critic scores
+                real_score = critic(cover)
+                fake_score = critic(stego)
+                
+                # Wasserstein loss for critic
+                critic_loss = torch.mean(fake_score) - torch.mean(real_score)
+                
+                # Apply gradient penalty (WGAN-GP) with reduced coefficient
+                gradient_penalty = compute_gradient_penalty(critic, cover, stego, device)
+                critic_loss = critic_loss + 5 * gradient_penalty  # Changed from 10 to 5
+                
+                critic_loss.backward()
+                critic_optimizer.step()
+                
+                # Weight clipping removed - WGAN-GP handles Lipschitz constraint
                 
                 train_critic_loss += critic_loss.item()
             
@@ -285,7 +312,7 @@ def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10,
             # Adversarial loss - fool the critic
             adversarial_loss = -torch.mean(critic(stego))
             
-            # Combined loss
+            # Combined loss with updated weights
             combined_loss = (encoder_weight * encoder_mse + 
                             decoder_weight * decoder_loss + 
                             critic_weight * adversarial_loss)
@@ -303,13 +330,17 @@ def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10,
                 print(f"Batch {batch_idx+1}/{len(train_loader)}, "
                      f"Encoder Loss: {encoder_mse.item():.4f}, "
                      f"Decoder Loss: {decoder_loss.item():.4f}, "
-                     f"Adversarial Loss: {adversarial_loss.item():.4f}")
+                     f"Adversarial Loss: {adversarial_loss.item():.4f}, "
+                     f"Cover Score: {torch.mean(real_score).item():.4f}, "  # Added
+                     f"Stego Score: {torch.mean(fake_score).item():.4f}")   # Added
         
         # Calculate average losses
-        train_encoder_loss /= len(train_loader)
-        train_decoder_loss /= len(train_loader)
-        train_critic_loss /= (len(train_loader) * 5)  # 5 critic iterations per batch
-        train_adversarial_loss /= len(train_loader)
+        # Adjust divisor based on warmup phase
+        actual_batches = len(train_loader) if epoch > 0 else max(1, len(train_loader) - 100)
+        train_encoder_loss /= actual_batches
+        train_decoder_loss /= actual_batches
+        train_critic_loss /= (actual_batches * critic_iterations)
+        train_adversarial_loss /= actual_batches
         
         # Validation
         encoder.eval()
@@ -323,6 +354,8 @@ def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10,
         val_psnr = 0
         val_ssim = 0
         val_bit_accuracy = 0
+        val_real_score = 0
+        val_fake_score = 0
         
         with torch.no_grad():
             for cover in val_loader:
@@ -364,6 +397,8 @@ def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10,
                 val_critic_loss += critic_loss.item()
                 val_adversarial_loss += adversarial_loss.item()
                 val_bit_accuracy += bit_accuracy.item()
+                val_real_score += torch.mean(real_score).item()
+                val_fake_score += torch.mean(fake_score).item()
         
         # Calculate average validation metrics
         val_encoder_loss /= len(val_loader)
@@ -373,12 +408,15 @@ def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10,
         val_psnr /= len(val_loader) * batch_size
         val_ssim /= len(val_loader) * batch_size
         val_bit_accuracy /= len(val_loader)
+        val_real_score /= len(val_loader)
+        val_fake_score /= len(val_loader)
         
         print(f"Epoch {epoch+1} Results:")
         print(f"Train Encoder Loss: {train_encoder_loss:.4f}, Train Decoder Loss: {train_decoder_loss:.4f}")
         print(f"Train Critic Loss: {train_critic_loss:.4f}, Train Adversarial Loss: {train_adversarial_loss:.4f}")
         print(f"Val Encoder Loss: {val_encoder_loss:.4f}, Val Decoder Loss: {val_decoder_loss:.4f}")
         print(f"Val Critic Loss: {val_critic_loss:.4f}, Val Adversarial Loss: {val_adversarial_loss:.4f}")
+        print(f"Val Real Score: {val_real_score:.4f}, Val Fake Score: {val_fake_score:.4f}")
         print(f"Val PSNR: {val_psnr:.2f} dB, Val SSIM: {val_ssim:.4f}")
         print(f"Val Bit Accuracy: {val_bit_accuracy:.4f}")
         
@@ -589,8 +627,8 @@ def main():
     parser.add_argument('--batch_size', type=int, default=4, help='Batch size')
     parser.add_argument('--data_depth', type=int, default=1, help='Data depth')
     parser.add_argument('--hidden_size', type=int, default=32, help='Hidden size for networks')
-    parser.add_argument('--critic_weight', type=float, default=1.0, help='Weight for critic loss')
-    parser.add_argument('--encoder_weight', type=float, default=10.0, help='Weight for encoder loss')
+    parser.add_argument('--critic_weight', type=float, default=2.0, help='Weight for critic loss')
+    parser.add_argument('--encoder_weight', type=float, default=5.0, help='Weight for encoder loss')
     parser.add_argument('--decoder_weight', type=float, default=1.0, help='Weight for decoder loss')
     parser.add_argument('--cuda', action='store_true', help='Use CUDA if available')
     args = parser.parse_args()
