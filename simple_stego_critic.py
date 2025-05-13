@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Enhanced steganography model for X-ray images with critic network (SteganoGAN-style)
+Enhanced steganography model for X-ray images using SteganoGAN architecture
 """
 import torch
 import torch.nn as nn
@@ -16,9 +16,65 @@ from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 import random
 from glob import glob
 import torch.backends.cudnn as cudnn
+import zlib
+from collections import Counter
+
+# Try to import reedsolo, with error handling
+try:
+    from reedsolo import RSCodec
+    rs = RSCodec(250)  # SteganoGAN uses 250 bytes for error correction
+except ImportError:
+    print("Warning: reedsolo module not found. Please install with 'pip install reedsolo'")
+    print("Continuing without error correction...")
+    rs = None
 
 # Enable cuDNN benchmarking for faster convolutions
 cudnn.benchmark = True
+
+# Text processing utilities from SteganoGAN
+def text_to_bits(text):
+    """Convert text to a list of ints in {0, 1}"""
+    return bytearray_to_bits(text_to_bytearray(text))
+
+def bits_to_text(bits):
+    """Convert a list of ints in {0, 1} to text"""
+    return bytearray_to_text(bits_to_bytearray(bits))
+
+def bytearray_to_bits(x):
+    """Convert bytearray to a list of bits"""
+    result = []
+    for i in x:
+        bits = bin(i)[2:]
+        bits = '00000000'[len(bits):] + bits
+        result.extend([int(b) for b in bits])
+    return result
+
+def bits_to_bytearray(bits):
+    """Convert a list of bits to a bytearray"""
+    ints = []
+    for b in range(len(bits) // 8):
+        byte = bits[b * 8:(b + 1) * 8]
+        ints.append(int(''.join([str(bit) for bit in byte]), 2))
+    return bytearray(ints)
+
+def text_to_bytearray(text):
+    """Compress and add error correction"""
+    assert isinstance(text, str), "expected a string"
+    x = zlib.compress(text.encode("utf-8"))
+    if rs is not None:
+        x = rs.encode(bytearray(x))
+    return x
+
+def bytearray_to_text(x):
+    """Apply error correction and decompress"""
+    try:
+        if rs is not None:
+            x = rs.decode(x)[0]  # Get the corrected data
+        text = zlib.decompress(x)
+        return text.decode("utf-8")
+    except Exception as e:
+        print(f"Error in decoding: {e}")
+        return False
 
 # Define SteganoGAN-style encoder
 class DenseEncoder(nn.Module):
@@ -26,7 +82,7 @@ class DenseEncoder(nn.Module):
     The DenseEncoder module takes a cover image and data tensor and combines
     them into a steganographic image using dense connectivity.
     """
-    def __init__(self, data_depth=1, hidden_size=32):
+    def __init__(self, data_depth=1, hidden_size=64):
         super(DenseEncoder, self).__init__()
         self.data_depth = data_depth
         
@@ -72,7 +128,7 @@ class DenseDecoder(nn.Module):
     The DenseDecoder module takes a steganographic image and attempts to decode
     the embedded data tensor using dense connectivity.
     """
-    def __init__(self, data_depth=1, hidden_size=32):
+    def __init__(self, data_depth=1, hidden_size=64):
         super(DenseDecoder, self).__init__()
         self.data_depth = data_depth
         
@@ -103,7 +159,7 @@ class DenseDecoder(nn.Module):
         )
     
     def forward(self, x):
-        # Dense connectivity pattern
+        # Dense connectivity pattern (exactly like SteganoGAN)
         x1 = self.conv1(x)
         x2 = self.conv2(x1)
         x3 = self.conv3(torch.cat([x1, x2], dim=1))
@@ -111,13 +167,13 @@ class DenseDecoder(nn.Module):
         
         return x4
 
-# Define SteganoGAN-style critic (discriminator)
+# Define SteganoGAN-style critic
 class BasicCritic(nn.Module):
     """
     The Critic module takes an image and predicts whether it is a cover
     image or a steganographic image.
     """
-    def __init__(self, hidden_size=32):
+    def __init__(self, hidden_size=64):
         super(BasicCritic, self).__init__()
         
         # Simple sequential model as in SteganoGAN
@@ -142,7 +198,7 @@ class BasicCritic(nn.Module):
         # Global mean
         return torch.mean(x.view(x.size(0), -1), dim=1)
 
-# Dataset class for X-ray images (unchanged)
+# Dataset class for X-ray images
 class XrayDataset(Dataset):
     def __init__(self, root_dir, transform=None, size=(256, 256)):
         self.root_dir = root_dir
@@ -163,13 +219,14 @@ class XrayDataset(Dataset):
         
         return image
 
-# Helper function to create random binary data (unchanged)
+# Helper function to create random binary data for training
 def generate_random_data(batch_size, data_depth, height, width, device):
+    """Generate random binary data for training."""
     return torch.randint(0, 2, (batch_size, data_depth, height, width), device=device).float()
 
 # Enhanced SteganoGAN-style training function
 def train_model(train_dir, val_dir, output_dir='stegano_model', epochs=10, 
-                batch_size=8, data_depth=1, img_size=256, hidden_size=32, 
+                batch_size=8, data_depth=1, img_size=256, hidden_size=64, 
                 use_cuda=False):
     # Set device
     device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
@@ -382,9 +439,24 @@ def train_model(train_dir, val_dir, output_dir='stegano_model', epochs=10,
     print("Training completed. Models saved.")
     return encoder, decoder, critic
 
+def _make_payload(width, height, depth, text):
+    """
+    This takes a piece of text and encodes it into a bit vector. It then
+    fills a matrix of size (width, height) with copies of the bit vector.
+    """
+    message = text_to_bits(text) + [0] * 32
+    
+    payload = message
+    while len(payload) < width * height * depth:
+        payload += message
+
+    payload = payload[:width * height * depth]
+
+    return torch.FloatTensor(payload).view(1, depth, height, width)
+
 # Function to encode a message into an image (SteganoGAN-style)
 def encode_message(encoder, input_image, output_image, message, data_depth=1, use_cuda=False):
-    """Encode a message into an image."""
+    """Encode a message into an image using SteganoGAN approach."""
     # Set device
     device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
     encoder.to(device)
@@ -399,22 +471,9 @@ def encode_message(encoder, input_image, output_image, message, data_depth=1, us
     ])
     image_tensor = transform(image).unsqueeze(0).to(device)
     
-    # Prepare the message as binary
-    binary_message = ''.join(format(ord(char), '08b') for char in message)
-    print(f"Message binary length: {len(binary_message)} bits")
-    
-    # Create payload tensor
+    # Create payload using SteganoGAN's approach
     height, width = image_tensor.shape[2], image_tensor.shape[3]
-    payload = torch.zeros((1, data_depth, height, width), device=device)
-    
-    # Fill payload with message bits (repeat if necessary)
-    idx = 0
-    for h in range(height):
-        for w in range(width):
-            for d in range(data_depth):
-                if idx < len(binary_message):
-                    payload[0, d, h, w] = float(binary_message[idx])
-                    idx = (idx + 1) % len(binary_message)
+    payload = _make_payload(width, height, data_depth, message).to(device)
     
     # Encode the message
     with torch.no_grad():
@@ -443,9 +502,9 @@ def encode_message(encoder, input_image, output_image, message, data_depth=1, us
     
     return {'psnr': psnr_value, 'ssim': ssim_value}
 
-# Function to decode a message from an image
+# Function to decode a message from an image (SteganoGAN-style)
 def decode_message(decoder, stego_image, data_depth=1, use_cuda=False):
-    """Decode a message from an image."""
+    """Decode a message from an image using SteganoGAN approach."""
     # Set device
     device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
     decoder.to(device)
@@ -464,50 +523,51 @@ def decode_message(decoder, stego_image, data_depth=1, use_cuda=False):
     with torch.no_grad():
         decoded = decoder(image_tensor)
     
-    # Extract binary message
-    decoded_bits = (decoded >= 0).cpu().numpy().flatten()
+    # Extract binary message using SteganoGAN approach
+    image = (decoded >= 0).cpu().numpy().flatten()
     
-    # Convert bits to text, looking for valid characters
-    message = ""
-    repeating_pattern = None
+    # split and decode messages
+    candidates = Counter()
+    bits = image.tolist()
+    for candidate in bits_to_bytearray(bits).split(b'\x00\x00\x00\x00'):
+        candidate = bytearray_to_text(bytearray(candidate))
+        if candidate:
+            candidates[candidate] += 1
     
-    # Try to decode the first few hundred characters
-    max_chars_to_check = 100
-    
-    for i in range(0, min(max_chars_to_check * 8, len(decoded_bits)), 8):
-        if i + 8 <= len(decoded_bits):
-            byte = 0
-            for j in range(8):
-                byte = (byte << 1) | int(decoded_bits[i + j])
+    # choose most common message
+    if len(candidates) == 0:
+        # If no messages were found, try to extract printable characters
+        raw_message = ""
+        for i in range(0, min(1000, len(bits)), 8):
+            if i + 8 <= len(bits):
+                byte = 0
+                for j in range(8):
+                    byte = (byte << 1) | int(bits[i + j])
+                
+                if 32 <= byte <= 126:
+                    raw_message += chr(byte)
+        
+        if len(raw_message) > 0:
+            # Look for repeating patterns
+            for pattern_length in range(1, min(50, len(raw_message) // 2)):
+                pattern = raw_message[:pattern_length]
+                count = 0
+                for i in range(0, len(raw_message), pattern_length):
+                    if raw_message[i:i+pattern_length] == pattern:
+                        count += 1
+                    else:
+                        break
+                
+                if count >= 2:
+                    print(f"Found repeating pattern: {pattern}")
+                    return pattern
             
-            # Only add printable ASCII characters
-            if 32 <= byte <= 126:
-                message += chr(byte)
-    
-    # Look for repeating patterns in the decoded message
-    if len(message) > 0:
-        # Try to find a pattern by looking at the first half of the decoded message
-        for pattern_length in range(1, len(message) // 2):
-            pattern = message[:pattern_length]
-            # Check if this pattern repeats at least twice
-            repetitions = 0
-            for i in range(0, len(message), pattern_length):
-                if message[i:i+pattern_length] == pattern:
-                    repetitions += 1
-                else:
-                    break
+            return raw_message[:50]  # Return first 50 chars if no pattern found
             
-            if repetitions >= 2:
-                repeating_pattern = pattern
-                break
+        raise ValueError('Failed to find message.')
     
-    print(f"Decoded raw message: {message[:50]}..." if len(message) > 50 else f"Decoded raw message: {message}")
-    
-    if repeating_pattern:
-        print(f"Detected repeating pattern: {repeating_pattern}")
-        return repeating_pattern
-    else:
-        return message
+    candidate, count = candidates.most_common(1)[0]
+    return candidate
 
 # Function to test the critic's detection capabilities
 def detect_steganography(critic, cover_image, stego_image, use_cuda=False):
@@ -556,7 +616,7 @@ def detect_steganography(critic, cover_image, stego_image, use_cuda=False):
 
 # Main function
 def main():
-    parser = argparse.ArgumentParser(description="Train and test SteganoGAN-style steganography model")
+    parser = argparse.ArgumentParser(description="SteganoGAN-style steganography model")
     parser.add_argument('--train', action='store_true', help='Train a new model')
     parser.add_argument('--encode', action='store_true', help='Encode a message')
     parser.add_argument('--decode', action='store_true', help='Decode a message')
@@ -568,14 +628,14 @@ def main():
                         help='Directory to save/load models')
     parser.add_argument('--input', type=str, default='steganogan/data/xrays/val/0001.jpg',
                         help='Input image for encoding')
-    parser.add_argument('--output', type=str, default='stego_xray.png',
+    parser.add_argument('--output', type=str, default='stego_image.png',
                         help='Output path for steganographic image')
-    parser.add_argument('--message', type=str, default='Name: YALLAPA',
+    parser.add_argument('--message', type=str, default='Your secret message',
                         help='Message to encode')
-    parser.add_argument('--epochs', type=int, default=5, help='Number of training epochs')
+    parser.add_argument('--epochs', type=int, default=20, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
     parser.add_argument('--data_depth', type=int, default=1, help='Data depth')
-    parser.add_argument('--hidden_size', type=int, default=32, help='Hidden size for networks')
+    parser.add_argument('--hidden_size', type=int, default=64, help='Hidden size for networks')
     parser.add_argument('--cuda', action='store_true', help='Use CUDA if available')
     args = parser.parse_args()
     
@@ -632,11 +692,11 @@ def main():
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
         
         ax1.imshow(np.array(original))
-        ax1.set_title("Original X-ray")
+        ax1.set_title("Original Image")
         ax1.axis('off')
         
         ax2.imshow(np.array(stego))
-        ax2.set_title(f"Steganographic X-ray\nPSNR: {metrics['psnr']:.2f} dB, SSIM: {metrics['ssim']:.4f}")
+        ax2.set_title(f"Steganographic Image\nPSNR: {metrics['psnr']:.2f} dB, SSIM: {metrics['ssim']:.4f}")
         ax2.axis('off')
         
         plt.tight_layout()
