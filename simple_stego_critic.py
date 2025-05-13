@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Enhanced steganography model for X-ray images with critic network (GAN-based)
+Enhanced steganography model for X-ray images with critic network (SteganoGAN-style)
 """
 import torch
 import torch.nn as nn
@@ -15,120 +15,132 @@ import matplotlib.pyplot as plt
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 import random
 from glob import glob
+import torch.backends.cudnn as cudnn
 
-# Define encoder network
-class Encoder(nn.Module):
+# Enable cuDNN benchmarking for faster convolutions
+cudnn.benchmark = True
+
+# Define SteganoGAN-style encoder
+class DenseEncoder(nn.Module):
+    """
+    The DenseEncoder module takes a cover image and data tensor and combines
+    them into a steganographic image using dense connectivity.
+    """
     def __init__(self, data_depth=1, hidden_size=32):
-        super(Encoder, self).__init__()
+        super(DenseEncoder, self).__init__()
         self.data_depth = data_depth
         
-        # Initial feature extraction
+        # First layer - feature extraction
         self.conv1 = nn.Sequential(
             nn.Conv2d(3, hidden_size, kernel_size=3, padding=1),
             nn.LeakyReLU(inplace=True),
             nn.BatchNorm2d(hidden_size)
         )
         
-        # Combined processing
+        # Second layer - combine features with data
         self.conv2 = nn.Sequential(
             nn.Conv2d(hidden_size + data_depth, hidden_size, kernel_size=3, padding=1),
             nn.LeakyReLU(inplace=True),
             nn.BatchNorm2d(hidden_size)
         )
         
-        # Additional processing for better hiding
-        self.conv2_extra = nn.Sequential(
-            nn.Conv2d(hidden_size, hidden_size, kernel_size=3, padding=1),
+        # Third layer - process combined features with dense connectivity
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(hidden_size * 2 + data_depth, hidden_size, kernel_size=3, padding=1),
             nn.LeakyReLU(inplace=True),
             nn.BatchNorm2d(hidden_size)
         )
         
-        # Final image generation
-        self.conv3 = nn.Sequential(
-            nn.Conv2d(hidden_size, 3, kernel_size=3, padding=1),
-            nn.Tanh()
+        # Output layer - generate residual
+        self.conv4 = nn.Sequential(
+            nn.Conv2d(hidden_size * 3 + data_depth, 3, kernel_size=3, padding=1)
         )
     
     def forward(self, image, data):
-        x = self.conv1(image)
-        x = self.conv2(torch.cat([x, data], dim=1))
-        x = self.conv2_extra(x)  # Extra processing
-        x = self.conv3(x)
-        return image + x  # Residual connection
+        # Dense connectivity pattern (exactly like SteganoGAN)
+        x1 = self.conv1(image)
+        x2 = self.conv2(torch.cat([x1, data], dim=1))
+        x3 = self.conv3(torch.cat([x1, x2, data], dim=1))
+        x4 = self.conv4(torch.cat([x1, x2, x3, data], dim=1))
+        
+        # Residual connection (crucial for image quality)
+        return image + x4
 
-# Define decoder network
-class Decoder(nn.Module):
+# Define SteganoGAN-style decoder
+class DenseDecoder(nn.Module):
+    """
+    The DenseDecoder module takes a steganographic image and attempts to decode
+    the embedded data tensor using dense connectivity.
+    """
     def __init__(self, data_depth=1, hidden_size=32):
-        super(Decoder, self).__init__()
+        super(DenseDecoder, self).__init__()
+        self.data_depth = data_depth
         
+        # First layer - feature extraction
         self.conv1 = nn.Sequential(
             nn.Conv2d(3, hidden_size, kernel_size=3, padding=1),
             nn.LeakyReLU(inplace=True),
             nn.BatchNorm2d(hidden_size)
         )
         
+        # Second layer - feature processing
         self.conv2 = nn.Sequential(
             nn.Conv2d(hidden_size, hidden_size, kernel_size=3, padding=1),
             nn.LeakyReLU(inplace=True),
             nn.BatchNorm2d(hidden_size)
         )
         
-        # Additional processing for better extraction
-        self.conv2_extra = nn.Sequential(
-            nn.Conv2d(hidden_size, hidden_size, kernel_size=3, padding=1),
+        # Third layer - process with dense connectivity
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(hidden_size * 2, hidden_size, kernel_size=3, padding=1),
             nn.LeakyReLU(inplace=True),
             nn.BatchNorm2d(hidden_size)
         )
         
-        self.conv3 = nn.Sequential(
-            nn.Conv2d(hidden_size, data_depth, kernel_size=3, padding=1)
-        )
-    
-    def forward(self, image):
-        x = self.conv1(image)
-        x = self.conv2(x)
-        x = self.conv2_extra(x)  # Extra processing
-        x = self.conv3(x)
-        return x
-
-# Define critic network (new)
-class Critic(nn.Module):
-    def __init__(self, hidden_size=32):
-        super(Critic, self).__init__()
-        
-        # Initial feature extraction
-        self.conv1 = nn.Sequential(
-            nn.Conv2d(3, hidden_size, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.BatchNorm2d(hidden_size)
-        )
-        
-        # Feature processing
-        self.conv2 = nn.Sequential(
-            nn.Conv2d(hidden_size, hidden_size * 2, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.BatchNorm2d(hidden_size * 2)
-        )
-        
-        # More feature processing
-        self.conv3 = nn.Sequential(
-            nn.Conv2d(hidden_size * 2, hidden_size * 4, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.BatchNorm2d(hidden_size * 4)
-        )
-        
-        # Final discriminator output
+        # Output layer
         self.conv4 = nn.Sequential(
-            nn.Conv2d(hidden_size * 4, 1, kernel_size=3, padding=1),
-            nn.AdaptiveAvgPool2d(1)  # Global average pooling
+            nn.Conv2d(hidden_size * 3, data_depth, kernel_size=3, padding=1)
+        )
+    
+    def forward(self, x):
+        # Dense connectivity pattern
+        x1 = self.conv1(x)
+        x2 = self.conv2(x1)
+        x3 = self.conv3(torch.cat([x1, x2], dim=1))
+        x4 = self.conv4(torch.cat([x1, x2, x3], dim=1))
+        
+        return x4
+
+# Define SteganoGAN-style critic (discriminator)
+class BasicCritic(nn.Module):
+    """
+    The Critic module takes an image and predicts whether it is a cover
+    image or a steganographic image.
+    """
+    def __init__(self, hidden_size=32):
+        super(BasicCritic, self).__init__()
+        
+        # Simple sequential model as in SteganoGAN
+        self.layers = nn.Sequential(
+            nn.Conv2d(3, hidden_size, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.BatchNorm2d(hidden_size),
+            
+            nn.Conv2d(hidden_size, hidden_size, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.BatchNorm2d(hidden_size),
+            
+            nn.Conv2d(hidden_size, hidden_size, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.BatchNorm2d(hidden_size),
+            
+            nn.Conv2d(hidden_size, 1, kernel_size=3, padding=1)
         )
     
     def forward(self, image):
-        x = self.conv1(image)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        x = self.conv4(x)
-        return x.view(-1, 1).squeeze(1)  # Return a scalar score for each image
+        x = self.layers(image)
+        # Global mean
+        return torch.mean(x.view(x.size(0), -1), dim=1)
 
 # Dataset class for X-ray images (unchanged)
 class XrayDataset(Dataset):
@@ -155,39 +167,9 @@ class XrayDataset(Dataset):
 def generate_random_data(batch_size, data_depth, height, width, device):
     return torch.randint(0, 2, (batch_size, data_depth, height, width), device=device).float()
 
-# Helper function for WGAN-GP gradient penalty
-def compute_gradient_penalty(critic, real_samples, fake_samples, device):
-    """Compute gradient penalty for WGAN-GP"""
-    # Random weight for interpolation
-    alpha = torch.rand(real_samples.size(0), 1, 1, 1, device=device)
-    
-    # Interpolated images
-    interpolates = alpha * real_samples + (1 - alpha) * fake_samples
-    interpolates.requires_grad_(True)
-    
-    # Critic scores on interpolated images
-    disc_interpolates = critic(interpolates)
-    
-    # Compute gradients
-    gradients = torch.autograd.grad(
-        outputs=disc_interpolates,
-        inputs=interpolates,
-        grad_outputs=torch.ones_like(disc_interpolates, device=device),
-        create_graph=True,
-        retain_graph=True,
-        only_inputs=True
-    )[0]
-    
-    # Compute gradient penalty
-    gradients = gradients.view(gradients.size(0), -1)
-    gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
-    
-    return gradient_penalty
-
-# Enhanced training function with adversarial training
-def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10, 
-                batch_size=4, data_depth=1, img_size=256, hidden_size=32, 
-                critic_weight=2.0, encoder_weight=5.0, decoder_weight=1.0,  # Updated weights
+# Enhanced SteganoGAN-style training function
+def train_model(train_dir, val_dir, output_dir='stegano_model', epochs=10, 
+                batch_size=8, data_depth=1, img_size=256, hidden_size=32, 
                 use_cuda=False):
     # Set device
     device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
@@ -196,7 +178,7 @@ def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10,
     # Create model directory
     os.makedirs(output_dir, exist_ok=True)
     
-    # Data transformation
+    # Data transformation - SteganoGAN normalization
     transform = transforms.Compose([
         transforms.Resize((img_size, img_size)),
         transforms.ToTensor(),
@@ -207,20 +189,33 @@ def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10,
     train_dataset = XrayDataset(train_dir, transform, (img_size, img_size))
     val_dataset = XrayDataset(val_dir, transform, (img_size, img_size))
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=batch_size, 
+        shuffle=True, 
+        num_workers=4,
+        pin_memory=True
+    )
+    
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        num_workers=4,
+        pin_memory=True
+    )
     
     print(f"Training on {len(train_dataset)} images, validating on {len(val_dataset)} images")
     
-    # Initialize models
-    encoder = Encoder(data_depth, hidden_size).to(device)
-    decoder = Decoder(data_depth, hidden_size).to(device)
-    critic = Critic(hidden_size).to(device)
+    # Initialize models with SteganoGAN-like architecture
+    encoder = DenseEncoder(data_depth, hidden_size).to(device)
+    decoder = DenseDecoder(data_depth, hidden_size).to(device)
+    critic = BasicCritic(hidden_size).to(device)
     
-    # Setup optimizers - separate optimizers for generators and critic with updated learning rates
-    encoder_decoder_params = list(encoder.parameters()) + list(decoder.parameters())
-    encoder_decoder_optimizer = optim.Adam(encoder_decoder_params, lr=0.001)
-    critic_optimizer = optim.Adam(critic.parameters(), lr=0.0002)  # Increased from 0.0001
+    # Setup optimizers with SteganoGAN learning rates
+    _dec_list = list(decoder.parameters()) + list(encoder.parameters())
+    critic_optimizer = optim.Adam(critic.parameters(), lr=1e-4)  # SteganoGAN rate
+    decoder_optimizer = optim.Adam(_dec_list, lr=1e-4)  # SteganoGAN rate
     
     # Training loop
     for epoch in range(epochs):
@@ -231,12 +226,10 @@ def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10,
         train_encoder_loss = 0
         train_decoder_loss = 0
         train_critic_loss = 0
-        train_adversarial_loss = 0
+        train_generated_score = 0
+        train_cover_score = 0
         
         print(f"Epoch {epoch+1}/{epochs}")
-        
-        # Dynamic critic iterations - more at the beginning
-        critic_iterations = 5 if epoch < 2 else 3
         
         # Training
         for batch_idx, cover in enumerate(train_loader):
@@ -246,101 +239,67 @@ def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10,
             # Generate random binary data
             payload = generate_random_data(batch_size, data_depth, height, width, device)
             
-            # Warmup phase - only train critic in first few batches of first epoch
-            if epoch == 0 and batch_idx < 100:
-                # Train only the critic
-                critic_optimizer.zero_grad()
-                
-                # Generate stego images
-                with torch.no_grad():
-                    stego = encoder(cover, payload)
-                
-                # Critic scores
-                real_score = critic(cover)
-                fake_score = critic(stego)
-                
-                # Wasserstein loss for critic
-                critic_loss = torch.mean(fake_score) - torch.mean(real_score)
-                
-                # Apply gradient penalty (WGAN-GP) with reduced coefficient
-                gradient_penalty = compute_gradient_penalty(critic, cover, stego, device)
-                critic_loss = critic_loss + 5 * gradient_penalty  # Changed from 10 to 5
-                
-                critic_loss.backward()
-                critic_optimizer.step()
-                
-                train_critic_loss += critic_loss.item()
-                continue
+            # ===== Train Critic (exactly like SteganoGAN) =====
+            critic_optimizer.zero_grad()
             
-            # ===== Train Critic =====
-            for _ in range(critic_iterations):
-                critic_optimizer.zero_grad()
-                
-                # Generate stego images
-                with torch.no_grad():
-                    stego = encoder(cover, payload)
-                
-                # Critic scores
-                real_score = critic(cover)
-                fake_score = critic(stego)
-                
-                # Wasserstein loss for critic
-                critic_loss = torch.mean(fake_score) - torch.mean(real_score)
-                
-                # Apply gradient penalty (WGAN-GP) with reduced coefficient
-                gradient_penalty = compute_gradient_penalty(critic, cover, stego, device)
-                critic_loss = critic_loss + 5 * gradient_penalty  # Changed from 10 to 5
-                
-                critic_loss.backward()
-                critic_optimizer.step()
-                
-                # Weight clipping removed - WGAN-GP handles Lipschitz constraint
-                
-                train_critic_loss += critic_loss.item()
+            # Generate stego images
+            with torch.no_grad():
+                generated = encoder(cover, payload)
             
-            # ===== Train Encoder and Decoder =====
-            encoder_decoder_optimizer.zero_grad()
+            # Critic scores
+            cover_score = torch.mean(critic(cover))
+            generated_score = torch.mean(critic(generated))
+            
+            # Wasserstein loss for critic
+            critic_loss = cover_score - generated_score
+            
+            # Backward and optimize
+            critic_loss.backward()
+            critic_optimizer.step()
+            
+            # Weight clipping as in SteganoGAN
+            for p in critic.parameters():
+                p.data.clamp_(-0.1, 0.1)
+            
+            # ===== Train Encoder and Decoder (exactly like SteganoGAN) =====
+            decoder_optimizer.zero_grad()
             
             # Forward pass
-            stego = encoder(cover, payload)
-            decoded = decoder(stego)
+            generated = encoder(cover, payload)
+            decoded = decoder(generated)
             
             # Calculate losses
-            encoder_mse = nn.MSELoss()(stego, cover)
+            encoder_mse = nn.MSELoss()(generated, cover)
             decoder_loss = nn.BCEWithLogitsLoss()(decoded, payload)
+            generated_score = torch.mean(critic(generated))
             
-            # Adversarial loss - fool the critic
-            adversarial_loss = -torch.mean(critic(stego))
-            
-            # Combined loss with updated weights
-            combined_loss = (encoder_weight * encoder_mse + 
-                            decoder_weight * decoder_loss + 
-                            critic_weight * adversarial_loss)
+            # Combined loss - SteganoGAN formula with 100x weight on MSE
+            combined_loss = 100.0 * encoder_mse + decoder_loss + generated_score
             
             # Backward pass and optimize
             combined_loss.backward()
-            encoder_decoder_optimizer.step()
+            decoder_optimizer.step()
             
             # Update metrics
             train_encoder_loss += encoder_mse.item()
             train_decoder_loss += decoder_loss.item()
-            train_adversarial_loss += adversarial_loss.item()
+            train_critic_loss += critic_loss.item()
+            train_generated_score += generated_score.item()
+            train_cover_score += cover_score.item()
             
             if (batch_idx + 1) % 10 == 0:
                 print(f"Batch {batch_idx+1}/{len(train_loader)}, "
-                     f"Encoder Loss: {encoder_mse.item():.4f}, "
+                     f"Encoder MSE: {encoder_mse.item():.4f}, "
                      f"Decoder Loss: {decoder_loss.item():.4f}, "
-                     f"Adversarial Loss: {adversarial_loss.item():.4f}, "
-                     f"Cover Score: {torch.mean(real_score).item():.4f}, "  # Added
-                     f"Stego Score: {torch.mean(fake_score).item():.4f}")   # Added
+                     f"Cover Score: {cover_score.item():.4f}, "
+                     f"Generated Score: {generated_score.item():.4f}")
         
         # Calculate average losses
-        # Adjust divisor based on warmup phase
-        actual_batches = len(train_loader) if epoch > 0 else max(1, len(train_loader) - 100)
-        train_encoder_loss /= actual_batches
-        train_decoder_loss /= actual_batches
-        train_critic_loss /= (actual_batches * critic_iterations)
-        train_adversarial_loss /= actual_batches
+        train_encoder_loss /= len(train_loader)
+        train_decoder_loss /= len(train_loader)
+        train_critic_loss /= len(train_loader)
+        train_generated_score /= len(train_loader)
+        train_cover_score /= len(train_loader)
         
         # Validation
         encoder.eval()
@@ -350,12 +309,9 @@ def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10,
         val_encoder_loss = 0
         val_decoder_loss = 0
         val_critic_loss = 0
-        val_adversarial_loss = 0
         val_psnr = 0
         val_ssim = 0
         val_bit_accuracy = 0
-        val_real_score = 0
-        val_fake_score = 0
         
         with torch.no_grad():
             for cover in val_loader:
@@ -366,27 +322,26 @@ def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10,
                 payload = generate_random_data(batch_size, data_depth, height, width, device)
                 
                 # Forward pass
-                stego = encoder(cover, payload)
-                decoded = decoder(stego)
+                generated = encoder(cover, payload)
+                decoded = decoder(generated)
                 
                 # Critic scores
-                real_score = critic(cover)
-                fake_score = critic(stego)
+                cover_score = torch.mean(critic(cover))
+                generated_score = torch.mean(critic(generated))
                 
                 # Calculate losses
-                encoder_mse = nn.MSELoss()(stego, cover)
+                encoder_mse = nn.MSELoss()(generated, cover)
                 decoder_loss = nn.BCEWithLogitsLoss()(decoded, payload)
-                critic_loss = torch.mean(fake_score) - torch.mean(real_score)
-                adversarial_loss = -torch.mean(critic(stego))
+                critic_loss = cover_score - generated_score
                 
-                # Calculate metrics
-                stego_np = ((stego + 1) / 2).cpu().numpy().transpose(0, 2, 3, 1)
+                # For PSNR/SSIM calculation, convert from [-1,1] to [0,1] range
+                generated_np = ((generated + 1) / 2).cpu().numpy().transpose(0, 2, 3, 1)
                 cover_np = ((cover + 1) / 2).cpu().numpy().transpose(0, 2, 3, 1)
                 
                 for i in range(batch_size):
-                    val_psnr += peak_signal_noise_ratio(cover_np[i], stego_np[i])
+                    val_psnr += peak_signal_noise_ratio(cover_np[i], generated_np[i])
                     val_ssim += structural_similarity(
-                        cover_np[i], stego_np[i], multichannel=True, channel_axis=2, data_range=1.0)
+                        cover_np[i], generated_np[i], multichannel=True, channel_axis=2, data_range=1.0)
                 
                 # Calculate bit accuracy
                 bit_accuracy = torch.mean(((decoded >= 0) == (payload >= 0.5)).float())
@@ -395,28 +350,22 @@ def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10,
                 val_encoder_loss += encoder_mse.item()
                 val_decoder_loss += decoder_loss.item()
                 val_critic_loss += critic_loss.item()
-                val_adversarial_loss += adversarial_loss.item()
                 val_bit_accuracy += bit_accuracy.item()
-                val_real_score += torch.mean(real_score).item()
-                val_fake_score += torch.mean(fake_score).item()
         
         # Calculate average validation metrics
         val_encoder_loss /= len(val_loader)
         val_decoder_loss /= len(val_loader)
         val_critic_loss /= len(val_loader)
-        val_adversarial_loss /= len(val_loader)
         val_psnr /= len(val_loader) * batch_size
         val_ssim /= len(val_loader) * batch_size
         val_bit_accuracy /= len(val_loader)
-        val_real_score /= len(val_loader)
-        val_fake_score /= len(val_loader)
         
         print(f"Epoch {epoch+1} Results:")
-        print(f"Train Encoder Loss: {train_encoder_loss:.4f}, Train Decoder Loss: {train_decoder_loss:.4f}")
-        print(f"Train Critic Loss: {train_critic_loss:.4f}, Train Adversarial Loss: {train_adversarial_loss:.4f}")
-        print(f"Val Encoder Loss: {val_encoder_loss:.4f}, Val Decoder Loss: {val_decoder_loss:.4f}")
-        print(f"Val Critic Loss: {val_critic_loss:.4f}, Val Adversarial Loss: {val_adversarial_loss:.4f}")
-        print(f"Val Real Score: {val_real_score:.4f}, Val Fake Score: {val_fake_score:.4f}")
+        print(f"Train Encoder MSE: {train_encoder_loss:.4f}, Train Decoder Loss: {train_decoder_loss:.4f}")
+        print(f"Train Critic Loss: {train_critic_loss:.4f}")
+        print(f"Train Cover Score: {train_cover_score:.4f}, Train Generated Score: {train_generated_score:.4f}")
+        print(f"Val Encoder MSE: {val_encoder_loss:.4f}, Val Decoder Loss: {val_decoder_loss:.4f}")
+        print(f"Val Critic Loss: {val_critic_loss:.4f}")
         print(f"Val PSNR: {val_psnr:.2f} dB, Val SSIM: {val_ssim:.4f}")
         print(f"Val Bit Accuracy: {val_bit_accuracy:.4f}")
         
@@ -433,52 +382,7 @@ def train_model(train_dir, val_dir, output_dir='simple_model', epochs=10,
     print("Training completed. Models saved.")
     return encoder, decoder, critic
 
-# Function to test the critic's detection capabilities (new)
-def detect_steganography(critic, cover_image, stego_image, use_cuda=False):
-    """Test the critic's ability to detect steganographic images."""
-    # Set device
-    device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
-    critic.to(device)
-    critic.eval()
-    
-    # Load images
-    cover = Image.open(cover_image).convert('RGB')
-    stego = Image.open(stego_image).convert('RGB')
-    
-    # Transform images
-    transform = transforms.Compose([
-        transforms.Resize((256, 256)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
-    ])
-    
-    cover_tensor = transform(cover).unsqueeze(0).to(device)
-    stego_tensor = transform(stego).unsqueeze(0).to(device)
-    
-    # Get critic scores
-    with torch.no_grad():
-        cover_score = critic(cover_tensor).item()
-        stego_score = critic(stego_tensor).item()
-    
-    print("\nCritic Detection Results:")
-    print(f"Cover Image Score: {cover_score:.4f}")
-    print(f"Stego Image Score: {stego_score:.4f}")
-    
-    # In WGAN, lower scores indicate "real" and higher scores indicate "fake"
-    score_diff = stego_score - cover_score
-    
-    if score_diff > 0.5:
-        print("The critic STRONGLY detects steganography in the stego image.")
-    elif score_diff > 0.1:
-        print("The critic detects steganography in the stego image.")
-    elif score_diff > -0.1:
-        print("The critic slightly detects steganography in the stego image.")
-    else:
-        print("The critic does NOT detect steganography in the stego image (good hiding).")
-    
-    print(f"Detection Confidence: {min(abs(score_diff) * 100, 100):.1f}%")
-
-# Function to encode a message into an image (unchanged)
+# Function to encode a message into an image (SteganoGAN-style)
 def encode_message(encoder, input_image, output_image, message, data_depth=1, use_cuda=False):
     """Encode a message into an image."""
     # Set device
@@ -486,7 +390,7 @@ def encode_message(encoder, input_image, output_image, message, data_depth=1, us
     encoder.to(device)
     encoder.eval()
     
-    # Load and prepare the image
+    # Load and prepare the image (SteganoGAN scaling/normalization)
     image = Image.open(input_image).convert('RGB')
     transform = transforms.Compose([
         transforms.Resize((256, 256)),
@@ -539,9 +443,9 @@ def encode_message(encoder, input_image, output_image, message, data_depth=1, us
     
     return {'psnr': psnr_value, 'ssim': ssim_value}
 
-# Function to decode a message from an image (unchanged)
+# Function to decode a message from an image
 def decode_message(decoder, stego_image, data_depth=1, use_cuda=False):
-    """Decode a message from an image without requiring prior knowledge of the message."""
+    """Decode a message from an image."""
     # Set device
     device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
     decoder.to(device)
@@ -605,9 +509,54 @@ def decode_message(decoder, stego_image, data_depth=1, use_cuda=False):
     else:
         return message
 
-# Main function (updated)
+# Function to test the critic's detection capabilities
+def detect_steganography(critic, cover_image, stego_image, use_cuda=False):
+    """Test the critic's ability to detect steganographic images."""
+    # Set device
+    device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
+    critic.to(device)
+    critic.eval()
+    
+    # Load images
+    cover = Image.open(cover_image).convert('RGB')
+    stego = Image.open(stego_image).convert('RGB')
+    
+    # Transform images
+    transform = transforms.Compose([
+        transforms.Resize((256, 256)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+    ])
+    
+    cover_tensor = transform(cover).unsqueeze(0).to(device)
+    stego_tensor = transform(stego).unsqueeze(0).to(device)
+    
+    # Get critic scores
+    with torch.no_grad():
+        cover_score = critic(cover_tensor).item()
+        stego_score = critic(stego_tensor).item()
+    
+    print("\nCritic Detection Results:")
+    print(f"Cover Image Score: {cover_score:.4f}")
+    print(f"Stego Image Score: {stego_score:.4f}")
+    
+    # In WGAN, lower scores indicate "real" and higher scores indicate "fake"
+    score_diff = stego_score - cover_score
+    
+    if score_diff > 0.5:
+        print("The critic STRONGLY detects steganography in the stego image.")
+    elif score_diff > 0.1:
+        print("The critic detects steganography in the stego image.")
+    elif score_diff > -0.1:
+        print("The critic slightly detects steganography in the stego image.")
+    else:
+        print("The critic does NOT detect steganography in the stego image (good hiding).")
+    
+    print(f"Detection Confidence: {min(abs(score_diff) * 100, 100):.1f}%")
+
+# Main function
 def main():
-    parser = argparse.ArgumentParser(description="Train and test steganography model with critic")
+    parser = argparse.ArgumentParser(description="Train and test SteganoGAN-style steganography model")
     parser.add_argument('--train', action='store_true', help='Train a new model')
     parser.add_argument('--encode', action='store_true', help='Encode a message')
     parser.add_argument('--decode', action='store_true', help='Decode a message')
@@ -615,7 +564,7 @@ def main():
                         help='Directory with training images')
     parser.add_argument('--val_dir', type=str, default='steganogan/data/xrays/val',
                         help='Directory with validation images')
-    parser.add_argument('--model_dir', type=str, default='simple_model',
+    parser.add_argument('--model_dir', type=str, default='stegano_model',
                         help='Directory to save/load models')
     parser.add_argument('--input', type=str, default='steganogan/data/xrays/val/0001.jpg',
                         help='Input image for encoding')
@@ -624,12 +573,9 @@ def main():
     parser.add_argument('--message', type=str, default='Name: YALLAPA',
                         help='Message to encode')
     parser.add_argument('--epochs', type=int, default=5, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=4, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
     parser.add_argument('--data_depth', type=int, default=1, help='Data depth')
     parser.add_argument('--hidden_size', type=int, default=32, help='Hidden size for networks')
-    parser.add_argument('--critic_weight', type=float, default=2.0, help='Weight for critic loss')
-    parser.add_argument('--encoder_weight', type=float, default=5.0, help='Weight for encoder loss')
-    parser.add_argument('--decoder_weight', type=float, default=1.0, help='Weight for decoder loss')
     parser.add_argument('--cuda', action='store_true', help='Use CUDA if available')
     args = parser.parse_args()
     
@@ -646,9 +592,6 @@ def main():
             args.batch_size,
             args.data_depth,
             hidden_size=args.hidden_size,
-            critic_weight=args.critic_weight,
-            encoder_weight=args.encoder_weight,
-            decoder_weight=args.decoder_weight,
             use_cuda=args.cuda
         )
     else:
